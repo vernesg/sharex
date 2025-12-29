@@ -1,16 +1,10 @@
+// backend/src/routes/auth.ts
 import express from "express";
 import { readTokens, writeTokens, readUsers, writeUsers, User, readCodes, writeCodes } from "../storage";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 
 const router = express.Router();
-
-const JWT_SECRET = process.env.JWT_SECRET ?? "change_this_secret_for_prod";
-
-function sign(user: { id: string; username: string; isAdmin?: boolean }) {
-  return jwt.sign(user, JWT_SECRET, { expiresIn: "7d" });
-}
 
 async function ensureAdminSeed() {
   let users = await readUsers();
@@ -22,7 +16,8 @@ async function ensureAdminSeed() {
       passwordHash: pwHash,
       isAdmin: true,
       isPremium: true,
-      trialRemaining: 0
+      trialRemaining: 0,
+      sessionToken: undefined
     };
     users = [admin];
     await writeUsers(users);
@@ -37,11 +32,11 @@ router.post("/register", async (req, res) => {
   const users = await readUsers();
   if (users.find((u) => u.username === username)) return res.status(400).json({ error: "username exists" });
   const hash = await bcrypt.hash(password, 10);
-  const newUser: User = { id: uuidv4(), username, passwordHash: hash, isAdmin: false, isPremium: false, trialRemaining: 3 };
+  const sessionToken = uuidv4();
+  const newUser: User = { id: uuidv4(), username, passwordHash: hash, isAdmin: false, isPremium: false, trialRemaining: 3, sessionToken };
   users.push(newUser);
   await writeUsers(users);
-  const token = sign({ id: newUser.id, username: newUser.username, isAdmin: newUser.isAdmin });
-  res.json({ token, user: { id: newUser.id, username: newUser.username, isPremium: newUser.isPremium, trialRemaining: newUser.trialRemaining } });
+  res.json({ token: sessionToken, user: { id: newUser.id, username: newUser.username, isPremium: newUser.isPremium, trialRemaining: newUser.trialRemaining, isAdmin: newUser.isAdmin } });
 });
 
 // login
@@ -50,12 +45,28 @@ router.post("/login", async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: "username and password required" });
   const users = await readUsers();
-  const user = users.find((u) => u.username === username);
-  if (!user) return res.status(400).json({ error: "invalid credentials" });
-  const ok = await bcrypt.compare(password, user.passwordHash);
+  const userIdx = users.findIndex((u) => u.username === username);
+  if (userIdx === -1) return res.status(400).json({ error: "invalid credentials" });
+  const ok = await bcrypt.compare(password, users[userIdx].passwordHash);
   if (!ok) return res.status(400).json({ error: "invalid credentials" });
-  const token = sign({ id: user.id, username: user.username, isAdmin: user.isAdmin });
-  res.json({ token, user: { id: user.id, username: user.username, isPremium: user.isPremium, trialRemaining: user.trialRemaining, isAdmin: user.isAdmin } });
+  const sessionToken = uuidv4();
+  users[userIdx].sessionToken = sessionToken;
+  await writeUsers(users);
+  const user = users[userIdx];
+  res.json({ token: sessionToken, user: { id: user.id, username: user.username, isPremium: user.isPremium, trialRemaining: user.trialRemaining, isAdmin: user.isAdmin } });
+});
+
+// logout
+router.post("/logout", async (req, res) => {
+  const auth = req.headers.authorization?.split(" ")[1];
+  if (!auth) return res.json({ ok: true });
+  const users = await readUsers();
+  const userIdx = users.findIndex((u) => u.sessionToken === auth);
+  if (userIdx >= 0) {
+    users[userIdx].sessionToken = undefined;
+    await writeUsers(users);
+  }
+  res.json({ ok: true });
 });
 
 // get me
@@ -63,9 +74,8 @@ router.get("/me", async (req, res) => {
   const auth = req.headers.authorization?.split(" ")[1];
   if (!auth) return res.status(401).json({ error: "not authenticated" });
   try {
-    const payload: any = jwt.verify(auth, JWT_SECRET);
     const users = await readUsers();
-    const user = users.find((u) => u.id === payload.id);
+    const user = users.find((u) => u.sessionToken === auth);
     if (!user) return res.status(401).json({ error: "user not found" });
     res.json({ user: { id: user.id, username: user.username, isPremium: user.isPremium, trialRemaining: user.trialRemaining, isAdmin: user.isAdmin } });
   } catch (err) {
@@ -74,30 +84,32 @@ router.get("/me", async (req, res) => {
 });
 
 /**
- * POST /api/auth/tokens
- * body: { tokens: string[] }
+ * POST /api/auth/cookies
+ * body: { cookies: string[] }
  *
- * Accepts one or more raw access tokens (Graph API access tokens).
- * Stores tokens in backend/data/tokens.json (token + addedAt).
- *
- * Note: This endpoint does NOT accept or store cookies.
+ * Accepts one or more raw cookie strings (e.g. "c_user=...; xs=...;"), attempts to extract EAAG token,
+ * stores token+cookie pairs in data/tokens.json and returns results.
  */
-router.post("/tokens", async (req, res) => {
-  const tokensInput: string[] = req.body.tokens;
-  if (!Array.isArray(tokensInput) || tokensInput.length === 0) return res.status(400).json({ error: "tokens must be a non-empty array" });
-
+router.post("/cookies", async (req, res) => {
+  const cookies: string[] = req.body.cookies;
+  if (!Array.isArray(cookies) || cookies.length === 0) return res.status(400).json({ error: "cookies must be a non-empty array" });
   const tokens = await readTokens();
-  const results: Array<{ token: string; ok: boolean; error?: string }> = [];
+  const results: any[] = [];
+  const { extractTokenFromFacebook, parseCookieString } = require("../utils/facebook"); // dynamic import to avoid TS issues
 
-  for (const t of tokensInput) {
-    const token = String(t).trim();
-    if (!token) {
-      results.push({ token, ok: false, error: "empty token" });
-      continue;
+  for (const raw of cookies) {
+    try {
+      const cookieHeader = parseCookieString(raw);
+      const token = await extractTokenFromFacebook(cookieHeader);
+      if (!token) {
+        results.push({ cookie: cookieHeader, ok: false, error: "token not found" });
+        continue;
+      }
+      tokens.push({ token, cookie: cookieHeader, addedAt: new Date().toISOString() });
+      results.push({ cookie: cookieHeader, token, ok: true });
+    } catch (err: any) {
+      results.push({ cookie: raw, ok: false, error: String(err.message ?? err) });
     }
-    // Optionally, we could validate token format here; for now we store it as provided.
-    tokens.push({ token, addedAt: new Date().toISOString() });
-    results.push({ token, ok: true });
   }
 
   await writeTokens(tokens);
@@ -112,20 +124,17 @@ router.get("/tokens", async (_req, res) => {
 
 // redeem code
 router.post("/redeem", async (req, res) => {
-  const { code, auth } = req.body;
+  const { code, token } = req.body; // here token = session token
   if (!code) return res.status(400).json({ error: "code required" });
-  if (!auth) return res.status(401).json({ error: "auth token required" });
+  if (!token) return res.status(401).json({ error: "auth token required" });
   try {
-    const payload: any = jwt.verify(auth, JWT_SECRET);
     const users = await readUsers();
-    const userIdx = users.findIndex((u) => u.id === payload.id);
+    const userIdx = users.findIndex((u) => u.sessionToken === token);
     if (userIdx === -1) return res.status(401).json({ error: "user not found" });
     const codes = await readCodes();
     const codeEntry = codes.find((c) => c.code === code && !c.redeemedBy);
     if (!codeEntry) return res.status(400).json({ error: "invalid or already redeemed code" });
-    // redeem: set user premium and mark code used
     users[userIdx].isPremium = true;
-    users[userIdx].trialRemaining = users[userIdx].trialRemaining ?? 0;
     codeEntry.redeemedBy = users[userIdx].username;
     codeEntry.redeemedAt = new Date().toISOString();
     await writeUsers(users);
