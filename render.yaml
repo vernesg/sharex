@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: fb-autoshare-backend
+    env: docker
+    plan: free
+    repo: "<YOUR_GITHUB_USERNAME>/<YOUR_REPO>" # replace with your repo
+    branch: main
+    dockerfilePath: backend/Dockerfile
+    buildCommand: "" # Docker build handles it
+    startCommand: ""
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "4000"
+      # Add any other environment variables in the Render dashboard (never commit secrets)
+
+  - type: web
+    name: fb-autoshare-frontend
+    env: docker
+    plan: free
+    repo: "<YOUR_GITHUB_USERNAME>/<YOUR_REPO>" # replace with your repo
+    branch: main
+    dockerfilePath: frontend/Dockerfile
+    buildCommand: "" # Docker build handles it
+    startCommand: ""
+    autoDeploy: true
+    envVars:
+      - key: VITE_API_URL
+        value: "https://<YOUR_BACKEND_SERVICE>.onrender.com" # replace with backend URL after creation
