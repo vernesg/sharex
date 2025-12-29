@@ -1,0 +1,28 @@
+version: "3.8"
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: sharex-backend:latest
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      # Optional for testing:
+      # - MOCK_FB=true
+      # - TOKEN_FETCH_TIMEOUT_MS=10000
+    volumes:
+      - ./backend/data:/home/appuser/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: sharex-frontend:latest
+    ports:
+      - "5173:80"
+    environment:
+      - VITE_API_URL=http://localhost:4000
+    restart: unless-stopped
