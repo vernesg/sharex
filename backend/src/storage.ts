@@ -1,3 +1,4 @@
+// backend/src/storage.ts
 import fs from "fs/promises";
 import path from "path";
 
@@ -10,10 +11,12 @@ export type User = {
   isAdmin?: boolean;
   isPremium?: boolean;
   trialRemaining?: number;
+  sessionToken?: string; // server-side session token (UUID)
 };
 
 export type TokenEntry = {
   token: string;
+  cookie?: string; // keep cookie for posting if needed
   addedAt: string;
 };
 
@@ -45,10 +48,8 @@ async function writeJson<T>(filename: string, data: T): Promise<void> {
 }
 
 export async function readUsers(): Promise<User[]> {
-  const users = await readJson<User[]>("users.json", []);
-  return users;
+  return await readJson<User[]>("users.json", []);
 }
-
 export async function writeUsers(users: User[]) {
   await writeJson("users.json", users);
 }
